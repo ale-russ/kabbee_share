@@ -1,155 +1,181 @@
-import 'dart:developer';
-import 'dart:io';
+import "dart:developer";
+import "dart:io";
 import 'dart:typed_data';
-import 'package:flutter/material.dart';
-import 'package:file_picker/file_picker.dart';
-import 'package:permission_handler/permission_handler.dart';
+
+import "package:flutter/material.dart";
+import 'package:nearby_connections/nearby_connections.dart';
+import "package:file_picker/file_picker.dart";
+import "package:path_provider/path_provider.dart";
+import "package:permission_handler/permission_handler.dart";
 
 void main() {
-  runApp(KabbeeShare());
+  runApp(MyApp());
 }
 
-class KabbeeShare extends StatelessWidget {
+class MyApp extends StatefulWidget {
+  const MyApp({super.key});
+
+  @override
+  State<MyApp> createState() => _MyAppState();
+}
+
+class _MyAppState extends State<MyApp> {
+  final Strategy strategy = Strategy.P2P_CLUSTER;
+  List<String> discoverdDevices = [];
+  String connectedDevice = "";
+  bool isAdevertising = false;
+  bool isDiscovering = false;
+
+  @override
+  void initState() {
+    super.initState();
+    requestPermissions();
+  }
+
+  void requestPermissions() async {
+    await [
+      Permission.location,
+      Permission.bluetooth,
+      Permission.storage,
+      Permission.nearbyWifiDevices
+    ].request();
+  }
+
+  void startAdvertising() async {
+    try {
+      bool success = await Nearby().startAdvertising(
+          "Device-${DateTime.now().millisecondsSinceEpoch}", strategy,
+          onConnectionInitiated: onConnectionInitiated,
+          onConnectionResult: (id, status) {
+        if (status == Status.CONNECTED) {
+          setState(() {
+            connectedDevice = id;
+          });
+        }
+      }, onDisconnected: (id) {
+        setState(() {
+          connectedDevice = "";
+        });
+      });
+      if (success) setState(() => isAdevertising = true);
+    } catch (err) {
+      log("Error advertising: $err");
+    }
+  }
+
+  void startDiscovery() async {
+    try {
+      bool success = await Nearby().startDiscovery(
+          "Device-${DateTime.now().millisecondsSinceEpoch}", strategy,
+          onEndpointFound: (id, name, serviceId) {
+        setState(() {
+          discoverdDevices.add(id);
+        });
+      }, onEndpointLost: (id) {
+        setState(() {
+          discoverdDevices.remove(id);
+        });
+      });
+      if (success) setState(() => isDiscovering = true);
+    } catch (err) {
+      log("Error discovering: $err");
+    }
+  }
+
+  void stopAdvertising() {
+    Nearby().stopAdvertising();
+    setState(() => isAdevertising = false);
+  }
+
+  void onConnectionInitiated(String id, ConnectionInfo info) {
+    Nearby().acceptConnection(id, onPayLoadRecieved: (id, payload) async {
+      if (payload.type == PayloadType.BYTES) {
+        String fileName = String.fromCharCode(payload.bytes! as int);
+        List<Directory>? dir = await getExternalStorageDirectories();
+        File file = File("${dir?[0].path}/$fileName");
+        file.writeAsBytes(payload.bytes!);
+        log("Received File: $fileName at ${file.path}");
+      }
+    });
+  }
+
+  void sendFile() async {
+    FilePickerResult? result = await FilePicker.platform.pickFiles();
+
+    if (result != null && connectedDevice.isNotEmpty) {
+      File file = File(result.files.single.path!);
+
+      try {
+        // Payload filePayload = Payload.fromFile(file.path); // Corrected method
+        Nearby().sendFilePayload(connectedDevice, file as String);
+        print("Sending: ${file.path}");
+      } catch (e) {
+        print("Error sending file: $e");
+      }
+    } else {
+      print("No file selected or no device connected.");
+    }
+  }
+
+  void stopDiscovery() {
+    Nearby().stopDiscovery();
+    setState(() => isDiscovering = false);
+  }
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'KabbeeShare',
-      theme: ThemeData(primaryColor: Colors.blue),
-      home: FileShareScreen(),
-    );
-  }
-}
-
-class FileShareScreen extends StatefulWidget {
-  const FileShareScreen({super.key});
-
-  @override
-  State<FileShareScreen> createState() => _FileShareScreenState();
-}
-
-class _FileShareScreenState extends State<FileShareScreen> {
-  String _status = 'Select a file to share';
-  File? _file;
-
-  Future<void> _pickFile() async {
-    FilePickerResult? result = await FilePicker.platform.pickFiles();
-    if (result != null) {
-      setState(() {
-        _file = File(result.files.single.path!);
-        _status = 'File selected: ${_file!.path.split('/').last}';
-      });
-    }
-  }
-
-  Future<void> _sendFile() async {
-    if (_file == null) {
-      setState(() {
-        _status = "No File Selected";
-      });
-      return;
-    }
-
-    // Request permission
-    if (!await _requestPermission()) {
-      setState(() {
-        _status = "Permission Denied";
-      });
-      return;
-    }
-
-    ServerSocket server =
-        await ServerSocket.bind(InternetAddress.anyIPv4, 4040);
-    setState(() {
-      _status = "Waiting for receiver...";
-    });
-
-    server.listen((Socket socket) async {
-      setState(() {
-        _status = "Sending File...";
-      });
-
-      // Send file
-      List<int> fileBytes = await _file!.readAsBytes();
-      socket.add(fileBytes);
-      await socket.flush();
-      socket.destroy();
-
-      setState(() {
-        _status = 'File sent!';
-      });
-      server.close();
-    });
-  }
-
-  // Receive file
-  Future<void> _receiveFile() async {
-    // Request permission
-    if (!await _requestPermission()) {
-      setState(
-        () {
-          _status = "Permission Denied!";
-        },
-      );
-      return;
-    }
-
-    setState(() {
-      _status = "Connecting to sender...";
-    });
-
-    Socket socket = await Socket.connect('192.168.1.100', 4040);
-    setState(() {
-      _status = "Receiving file...";
-    });
-
-    // Receive File
-    List<int> fileBytes = [];
-    socket.listen(
-      (List<int> data) => fileBytes.addAll(data),
-      onDone: () async {
-        String filePath = "/storage/emulated/0/Download/received_file";
-        File file = File(filePath);
-        await file.writeAsBytes(fileBytes);
-        setState(() {
-          _status = "File received: $filePath";
-        });
-        socket.destroy();
-      },
-    );
-  }
-
-  Future<bool> _requestPermission() async {
-    log("Requesting permission");
-    var status = await Permission.storage.status;
-    log('status: $status');
-    if (!status.isGranted) {
-      status = await Permission.storage.request();
-    }
-    return status.isGranted;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text("Kabbee Share"),
-      ),
-      body: Center(
-        child: Column(
-          children: [
-            Text(_status),
-            const SizedBox(height: 28),
-            ElevatedButton(
-                onPressed: _pickFile, child: const Text("Select File")),
-            const SizedBox(height: 28),
-            ElevatedButton(
-                onPressed: _sendFile, child: const Text("Send File")),
-            const SizedBox(height: 28),
-            ElevatedButton(
-              onPressed: _receiveFile,
-              child: const Text("Receive File"),
-            )
-          ],
+      home: Scaffold(
+        appBar: AppBar(
+          title: Text("KAbbeeSHare"),
+        ),
+        body: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            children: [
+              ElevatedButton(
+                onPressed: isAdevertising ? stopAdvertising : startAdvertising,
+                child: Text(
+                    isAdevertising ? "Stop Advertising" : "Start Advertising"),
+              ),
+              ElevatedButton(
+                  onPressed: isDiscovering ? stopDiscovery : startDiscovery,
+                  child: Text(isDiscovering
+                      ? "Stop Discovering"
+                      : "Start Discovering")),
+              const SizedBox(height: 20),
+              Text("Discovered Devices"),
+              Expanded(
+                child: ListView.builder(
+                  itemCount: discoverdDevices.length,
+                  itemBuilder: (context, index) {
+                    return ListTile(
+                      title: Text(
+                        discoverdDevices[index],
+                      ),
+                      trailing: ElevatedButton(
+                        onPressed: () => Nearby().requestConnection(
+                            "Device-${DateTime.now().millisecondsSinceEpoch}",
+                            discoverdDevices[index],
+                            onConnectionInitiated: onConnectionInitiated,
+                            onConnectionResult: (id, status) {},
+                            onDisconnected: (id) {}),
+                        child: Text("Connect"),
+                      ),
+                    );
+                  },
+                ),
+              ),
+              if (connectedDevice.isNotEmpty)
+                Column(
+                  children: [
+                    Text("Connected to: $connectedDevice"),
+                    ElevatedButton(
+                        onPressed: sendFile, child: Text("Send File"))
+                  ],
+                )
+            ],
+          ),
         ),
       ),
     );

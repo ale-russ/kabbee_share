@@ -36,6 +36,9 @@ class _MyAppState extends State<MyApp> {
     await [
       Permission.location,
       Permission.bluetooth,
+      Permission.bluetoothConnect,
+      Permission.bluetoothAdvertise,
+      Permission.bluetoothScan,
       Permission.storage,
       Permission.nearbyWifiDevices
     ].request();
@@ -133,6 +136,22 @@ class _MyAppState extends State<MyApp> {
           padding: const EdgeInsets.all(16),
           child: Column(
             children: [
+              ElevatedButton(
+                  child:
+                      const Text("Check Bluetooth Permission (>= Android 12"),
+                  onPressed: () async {
+                    if (!(await Future.wait([
+                      Permission.bluetooth.isGranted,
+                      Permission.bluetoothAdvertise.isGranted,
+                      Permission.bluetoothConnect.isGranted,
+                      Permission.bluetoothScan.isGranted
+                    ]))
+                        .any((element) => false)) {
+                      log("Bluetooth permission granted");
+                    } else {
+                      log("Bluetooth permission is not granted");
+                    }
+                  }),
               ElevatedButton(
                 onPressed: isAdevertising ? stopAdvertising : startAdvertising,
                 child: Text(

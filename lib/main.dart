@@ -1,3 +1,4 @@
+import 'dart:developer';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
@@ -118,7 +119,9 @@ class _FileShareScreenState extends State<FileShareScreen> {
   }
 
   Future<bool> _requestPermission() async {
+    log("Requesting permission");
     var status = await Permission.storage.status;
+    log('status: $status');
     if (!status.isGranted) {
       status = await Permission.storage.request();
     }

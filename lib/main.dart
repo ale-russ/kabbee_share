@@ -1,11 +1,11 @@
 import "dart:developer";
 import "dart:io";
-import 'dart:typed_data';
-
+import "dart:typed_data";
 import "package:flutter/material.dart";
 import 'package:nearby_connections/nearby_connections.dart';
 import "package:file_picker/file_picker.dart";
 import "package:path_provider/path_provider.dart";
+
 import "package:permission_handler/permission_handler.dart";
 
 void main() {
@@ -21,10 +21,11 @@ class MyApp extends StatefulWidget {
 
 class _MyAppState extends State<MyApp> {
   final Strategy strategy = Strategy.P2P_CLUSTER;
-  List<String> discoverdDevices = [];
+  List<String> discoveredDevices = [];
   String connectedDevice = "";
-  bool isAdevertising = false;
+  bool isAdvertising = false;
   bool isDiscovering = false;
+  String deviceName = "Device-${DateTime.now().millisecondsSinceEpoch}";
 
   @override
   void initState() {
@@ -35,10 +36,9 @@ class _MyAppState extends State<MyApp> {
   void requestPermissions() async {
     await [
       Permission.location,
-      Permission.bluetooth,
+      Permission.bluetoothScan,
       Permission.bluetoothConnect,
       Permission.bluetoothAdvertise,
-      Permission.bluetoothScan,
       Permission.storage,
       Permission.nearbyWifiDevices
     ].request();
@@ -47,20 +47,26 @@ class _MyAppState extends State<MyApp> {
   void startAdvertising() async {
     try {
       bool success = await Nearby().startAdvertising(
-          "Device-${DateTime.now().millisecondsSinceEpoch}", strategy,
-          onConnectionInitiated: onConnectionInitiated,
-          onConnectionResult: (id, status) {
-        if (status == Status.CONNECTED) {
-          setState(() {
-            connectedDevice = id;
-          });
-        }
-      }, onDisconnected: (id) {
-        setState(() {
+        deviceName,
+        strategy,
+        onConnectionInitiated: onConnectionInitiated,
+        onConnectionResult: (id, status) {
+          log('id: $id');
+          log("Status: $status");
+          if (status == Status.CONNECTED) {
+            setState(() {
+              connectedDevice = id;
+            });
+          }
+        },
+        onDisconnected: (id) {
           connectedDevice = "";
-        });
-      });
-      if (success) setState(() => isAdevertising = true);
+          setState(() {});
+        },
+      );
+      log("SUCCESS ADVERTISING: $success");
+      if (success) setState(() => isAdvertising = true);
+      log('isAdvertising: $isAdvertising');
     } catch (err) {
       log("Error advertising: $err");
     }
@@ -69,16 +75,20 @@ class _MyAppState extends State<MyApp> {
   void startDiscovery() async {
     try {
       bool success = await Nearby().startDiscovery(
-          "Device-${DateTime.now().millisecondsSinceEpoch}", strategy,
-          onEndpointFound: (id, name, serviceId) {
-        setState(() {
-          discoverdDevices.add(id);
-        });
-      }, onEndpointLost: (id) {
-        setState(() {
-          discoverdDevices.remove(id);
-        });
-      });
+        deviceName,
+        strategy,
+        onEndpointFound: (id, name, serviceId) {
+          log('Found Device: $name ($id)');
+          setState(() {
+            discoveredDevices.add(id);
+          });
+        },
+        onEndpointLost: (id) {
+          setState(() {
+            discoveredDevices.remove(id);
+          });
+        },
+      );
       if (success) setState(() => isDiscovering = true);
     } catch (err) {
       log("Error discovering: $err");
@@ -87,19 +97,47 @@ class _MyAppState extends State<MyApp> {
 
   void stopAdvertising() {
     Nearby().stopAdvertising();
-    setState(() => isAdevertising = false);
+    setState(() => isAdvertising = false);
+  }
+
+  void stopDiscovery() {
+    Nearby().stopDiscovery();
+    setState(() => isDiscovering = false);
   }
 
   void onConnectionInitiated(String id, ConnectionInfo info) {
-    Nearby().acceptConnection(id, onPayLoadRecieved: (id, payload) async {
-      if (payload.type == PayloadType.BYTES) {
-        String fileName = String.fromCharCode(payload.bytes! as int);
-        List<Directory>? dir = await getExternalStorageDirectories();
-        File file = File("${dir?[0].path}/$fileName");
-        file.writeAsBytes(payload.bytes!);
-        log("Received File: $fileName at ${file.path}");
-      }
-    });
+    connectedDevice = id;
+    setState(() {});
+    Nearby().acceptConnection(
+      id,
+      onPayLoadRecieved: (id, payload) async {
+        if (payload.type == PayloadType.FILE) {
+          log("Receiving file...");
+        } else if (payload.type == PayloadType.BYTES) {
+          String fileName = String.fromCharCodes(payload.bytes!);
+          log("Receiving metadata: $fileName");
+        }
+      },
+      onPayloadTransferUpdate: (id, payloadTransferUpdate) async {
+        if (payloadTransferUpdate.status == PayloadStatus.IN_PROGRESS) {
+          log("File transfer in progress: ${payloadTransferUpdate.bytesTransferred}/${payloadTransferUpdate.totalBytes}");
+        } else if (payloadTransferUpdate.status == PayloadStatus.SUCCESS) {
+          log("File transfer successful! Processing file...");
+
+          // Move received file to a readable directory
+          List<Directory>? externalDirs = await getExternalStorageDirectories();
+          if (externalDirs != null && externalDirs.isNotEmpty) {
+            String targetPath = "${externalDirs.first.path}/received_file";
+            File receivedFile = File(targetPath);
+            log("File saved at: $targetPath");
+          } else {
+            log("Could not access external storage.");
+          }
+        } else if (payloadTransferUpdate.status == PayloadStatus.FAILURE) {
+          log("File transfer failed!");
+        }
+      },
+    );
   }
 
   void sendFile() async {
@@ -109,76 +147,58 @@ class _MyAppState extends State<MyApp> {
       File file = File(result.files.single.path!);
 
       try {
-        // Payload filePayload = Payload.fromFile(file.path); // Corrected method
-        Nearby().sendFilePayload(connectedDevice, file as String);
-        print("Sending: ${file.path}");
+        // Send file payload
+        int payloadId =
+            await Nearby().sendFilePayload(connectedDevice, file.path);
+        log("Sending file: ${file.path}");
+
+        // Send file name as metadata
+        Uint8List fileNameBytes =
+            Uint8List.fromList(file.uri.pathSegments.last.codeUnits);
+        Nearby().sendBytesPayload(connectedDevice, fileNameBytes);
       } catch (e) {
-        print("Error sending file: $e");
+        log("Error sending file: $e");
       }
     } else {
-      print("No file selected or no device connected.");
+      log("No file selected or no device connected.");
     }
-  }
-
-  void stopDiscovery() {
-    Nearby().stopDiscovery();
-    setState(() => isDiscovering = false);
   }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       home: Scaffold(
-        appBar: AppBar(
-          title: Text("KAbbeeSHare"),
-        ),
+        appBar: AppBar(title: Text("KAbbeeShare")),
         body: Padding(
           padding: const EdgeInsets.all(16),
           child: Column(
             children: [
               ElevatedButton(
-                  child:
-                      const Text("Check Bluetooth Permission (>= Android 12"),
-                  onPressed: () async {
-                    if (!(await Future.wait([
-                      Permission.bluetooth.isGranted,
-                      Permission.bluetoothAdvertise.isGranted,
-                      Permission.bluetoothConnect.isGranted,
-                      Permission.bluetoothScan.isGranted
-                    ]))
-                        .any((element) => false)) {
-                      log("Bluetooth permission granted");
-                    } else {
-                      log("Bluetooth permission is not granted");
-                    }
-                  }),
-              ElevatedButton(
-                onPressed: isAdevertising ? stopAdvertising : startAdvertising,
+                onPressed: isAdvertising ? stopAdvertising : startAdvertising,
                 child: Text(
-                    isAdevertising ? "Stop Advertising" : "Start Advertising"),
+                    isAdvertising ? "Stop Advertising" : "Start Advertising"),
               ),
               ElevatedButton(
-                  onPressed: isDiscovering ? stopDiscovery : startDiscovery,
-                  child: Text(isDiscovering
-                      ? "Stop Discovering"
-                      : "Start Discovering")),
+                onPressed: isDiscovering ? stopDiscovery : startDiscovery,
+                child: Text(
+                    isDiscovering ? "Stop Discovering" : "Start Discovering"),
+              ),
               const SizedBox(height: 20),
               Text("Discovered Devices"),
               Expanded(
                 child: ListView.builder(
-                  itemCount: discoverdDevices.length,
+                  itemCount: discoveredDevices.length,
                   itemBuilder: (context, index) {
                     return ListTile(
-                      title: Text(
-                        discoverdDevices[index],
-                      ),
+                      title: Text(discoveredDevices[index]),
                       trailing: ElevatedButton(
                         onPressed: () => Nearby().requestConnection(
-                            "Device-${DateTime.now().millisecondsSinceEpoch}",
-                            discoverdDevices[index],
-                            onConnectionInitiated: onConnectionInitiated,
-                            onConnectionResult: (id, status) {},
-                            onDisconnected: (id) {}),
+                          deviceName,
+                          discoveredDevices[index],
+                          onConnectionInitiated: onConnectionInitiated,
+                          onConnectionResult: (id, status) {},
+                          onDisconnected: (id) {},
+                        ),
                         child: Text("Connect"),
                       ),
                     );
@@ -190,7 +210,7 @@ class _MyAppState extends State<MyApp> {
                   children: [
                     Text("Connected to: $connectedDevice"),
                     ElevatedButton(
-                        onPressed: sendFile, child: Text("Send File"))
+                        onPressed: sendFile, child: Text("Send File")),
                   ],
                 )
             ],

@@ -42,7 +42,11 @@ dependencies:
   share_plus: ^10.1.4
   path_provider: ^2.1.5
   nearby_connections: ^4.2.0
-
+  open_file: ^3.3.1
+  fluttertoast: ^8.2.2
+  percent_indicator: ^4.2.2
+  location: ^8.0.0
+  image_picker: ^1.1.2
 dev_dependencies:
   flutter_test:
     sdk: flutter
